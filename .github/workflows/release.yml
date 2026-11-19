@@ -22,6 +22,9 @@ jobs:
     needs: checks
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    outputs:
+      released-version: ${{ steps.release.outputs.version }}
+      released-zip-sha256: ${{ steps.release.outputs.zip-sha256 }}
     permissions:
       contents: write
     concurrency:
@@ -48,6 +51,7 @@ jobs:
           path: ${{ runner.temp }}/release-assets
           merge-multiple: true
       - name: Verify and publish the release
+        id: release
         working-directory: ${{ runner.temp }}/release-assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -156,3 +160,92 @@ jobs:
           fi
           verify_tag
           gh api --method PATCH "$repo/releases/$id" -F draft=false --jq '.html_url'
+          printf 'version=%s\nzip-sha256=%s\n' "$VERSION" "$ZIP_SHA256" >> "$GITHUB_OUTPUT"
+          printf 'Tested ZIP SHA-256 for `%s`: `%s`\n' "$tag" "$ZIP_SHA256" >> "$GITHUB_STEP_SUMMARY"
+
+  marketplace:
+    name: Publish tested plugin to JetBrains Marketplace
+    needs: publish
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      vars.MARKETPLACE_ENABLED == 'true' &&
+      needs.publish.outputs.released-version != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: marketplace
+    concurrency:
+      group: marketplace-${{ needs.publish.outputs.released-version }}
+      cancel-in-progress: false
+    env:
+      VERSION: ${{ needs.publish.outputs.released-version }}
+    steps:
+      - name: Verify and download the published GitHub asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TESTED_ZIP_SHA256: ${{ needs.publish.outputs.released-zip-sha256 }}
+        run: |
+          [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+            echo 'Expected a stable version without the v prefix' >&2
+            exit 1
+          }
+          [[ "$TESTED_ZIP_SHA256" =~ ^[a-f0-9]{64}$ ]] || {
+            echo 'Expected the tested ZIP SHA-256 from the original Release run' >&2
+            exit 1
+          }
+          tag="v$VERSION"
+          zip="talend-idea-plugin-$VERSION.zip"
+          mkdir -- "$RUNNER_TEMP/marketplace"
+          cd -- "$RUNNER_TEMP/marketplace"
+          digest=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" |
+            jq -er --arg tag "$tag" --arg zip "$zip" '
+              select(.tag_name == $tag and .draft == false and .prerelease == false
+                and .author.login == "github-actions[bot]")
+              | [.assets[] | select(.name == $zip and .state == "uploaded") | .digest]
+              | select(length == 1) | .[0] | select(test("^sha256:[a-f0-9]{64}$"))
+            ')
+          [[ "$digest" == "sha256:$TESTED_ZIP_SHA256" ]] || {
+            echo "Released asset is not the tested ZIP for $tag" >&2
+            exit 1
+          }
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$zip"
+          printf '%s  %s\n' "$TESTED_ZIP_SHA256" "$zip" | sha256sum --check --strict
+
+      - name: Download pinned Marketplace ZIP Signer
+        working-directory: ${{ runner.temp }}/marketplace
+        run: |
+          curl --proto '=https' --proto-redir '=https' --fail --silent --show-error --location \
+            --output signer.jar \
+            https://github.com/JetBrains/marketplace-zip-signer/releases/download/0.1.45/marketplace-zip-signer-cli.jar
+          printf '%s  signer.jar\n' fc48b8a4165907e8164fc2a1256ed0d0fe6f7b25acb33ac48660ab13e7f64bb8 |
+            sha256sum --check --strict
+
+      - name: Sign and verify the published ZIP
+        working-directory: ${{ runner.temp }}/marketplace
+        env:
+          SIGNING_KEY: ${{ secrets.MARKETPLACE_SIGNING_KEY }}
+          SIGNING_CERT: ${{ secrets.MARKETPLACE_SIGNING_CERT }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.MARKETPLACE_SIGNING_KEY_PASSWORD }}
+        run: |
+          : "${SIGNING_KEY:?Missing signing key}" "${SIGNING_CERT:?Missing signing certificate}" \
+            "${SIGNING_KEY_PASSWORD:?Missing signing key password}"
+          umask 077
+          key_dir=$(mktemp -d "$RUNNER_TEMP/marketplace-key.XXXXXX")
+          trap 'rm -f -- "$key_dir/key.pem" "$key_dir/cert.pem"; rmdir -- "$key_dir"' EXIT
+          printf '%s\n' "$SIGNING_KEY" > "$key_dir/key.pem"
+          printf '%s\n' "$SIGNING_CERT" > "$key_dir/cert.pem"
+          java -jar signer.jar sign -in "talend-idea-plugin-$VERSION.zip" -out signed.zip \
+            -key-file "$key_dir/key.pem" -cert-file "$key_dir/cert.pem" -key-pass "$SIGNING_KEY_PASSWORD"
+          java -jar signer.jar verify -in signed.zip -cert "$key_dir/cert.pem"
+
+      - name: Submit the signed ZIP to the Stable channel
+        working-directory: ${{ runner.temp }}/marketplace
+        env:
+          MARKETPLACE_TOKEN: ${{ secrets.MARKETPLACE_TOKEN }}
+        run: |
+          : "${MARKETPLACE_TOKEN:?Missing Marketplace token}"
+          status=$(curl --proto '=https' --fail --silent --show-error --output /dev/null \
+            --write-out '%{http_code}' --header "Authorization: Bearer $MARKETPLACE_TOKEN" \
+            --form 'xmlId=dev.talend.idea' --form "file=@signed.zip;filename=talend-idea-plugin-$VERSION.zip" \
+            https://plugins.jetbrains.com/api/updates/upload)
+          [[ "$status" == 2[0-9][0-9] ]] || { echo "Unexpected Marketplace HTTP status: $status" >&2; exit 1; }
+          echo "Submitted v$VERSION to JetBrains Marketplace Stable."

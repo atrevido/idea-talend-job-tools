@@ -32,3 +32,9 @@ export JAVA_HOME="$IDEA_HOME/Contents/jbr/Contents/Home"
 Pull requests запускают тесты JUnit и сборку ZIP на закреплённой версии SDK IDEA. ZIP и отчёты при падении тестов доступны в артефактах Actions. Тесты используют синтетические Jobs; отдельный проект Talend не нужен.
 
 Чтобы выпустить релиз, обновите `version.txt` и влейте изменение в `main`. Workflow **Release** запускает те же проверки и публикует GitHub Release `v<версия>` с проверенным ZIP, `SHA256SUMS` и `BUILD_INFO.txt`. Пуши с уже выпущенной версией проходят проверки, но не меняют релиз. Если запуск завершился ошибкой, перезапустите его: публикацию черновика можно продолжить только с того же коммита. Gradle берёт из `version.txt` версию дескриптора и архива.
+
+### JetBrains Marketplace
+
+Первый подписанный ZIP загрузите вручную, чтобы зарегистрировать плагин `dev.talend.idea`. Перед включением публикации через CI создайте окружение GitHub `marketplace` и разрешите деплой только из ветки `main`. В окружении задайте секреты `MARKETPLACE_TOKEN`, `MARKETPLACE_SIGNING_KEY` (зашифрованный PEM), `MARKETPLACE_SIGNING_CERT` (PEM) и `MARKETPLACE_SIGNING_KEY_PASSWORD`. Затем задайте переменную Actions **репозитория** `MARKETPLACE_ENABLED` со значением `true`.
+
+После этого ZIP каждого нового GitHub Release сверяется с хешем из CI, подписывается и отправляется в Marketplace Stable. Загрузка не означает, что обновление уже доступно: проверяйте статус в Marketplace. Следующий пуш не отправит существующий релиз повторно. Если Marketplace не принял загрузку и job завершился ошибкой, перезапустите **только** job публикации в Marketplace в исходном запуске **Release**, а не весь workflow.

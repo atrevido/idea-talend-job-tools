@@ -1,0 +1,24 @@
+<idea-plugin>
+    <id>dev.talend.idea</id>
+    <name>Talend Job Tools</name>
+    <version>${pluginVersion}</version>
+    <vendor>Talend Job Tools contributors</vendor>
+    <idea-version since-build="263.7307" until-build="263.*"/>
+    <description>Browse Talend 8 Jobs, Routines and Contexts, and edit Java fragments directly in Job items.</description>
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.java</depends>
+    <depends>com.intellij.xml</depends>
+    <extensions defaultExtensionNs="com.intellij">
+        <editorNotificationProvider implementation="dev.talend.idea.FragmentTab$NotificationProvider"/>
+        <fileTypeDetector implementation="dev.talend.idea.TalendFileTypeDetector"/>
+        <java.elementFinder implementation="dev.talend.idea.TalendRoutineFinder"/>
+        <toolWindow id="Talend" anchor="left" factoryClass="dev.talend.idea.TalendToolWindow"/>
+    </extensions>
+    <actions>
+        <action id="dev.talend.idea.EditJava" class="dev.talend.idea.EditTalendJavaAction"
+                text="Edit Talend Java…" description="Edit Java in a Talend Job">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+    </actions>
+</idea-plugin>

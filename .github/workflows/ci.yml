@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    outputs:
+      version:
+        value: ${{ jobs.build.outputs.version }}
+      artifact-id:
+        value: ${{ jobs.build.outputs.artifact-id }}
+      zip-sha256:
+        value: ${{ jobs.build.outputs.zip-sha256 }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Test and package plugin
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      artifact-id: ${{ steps.artifact.outputs.artifact-id }}
+      zip-sha256: ${{ steps.package.outputs.zip-sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Validate build version and checkout
+        id: version
+        run: |
+          version=$(cat version.txt)
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo 'version.txt must contain a stable SemVer version (MAJOR.MINOR.PATCH).' >&2
+            exit 1
+          fi
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Verify IntelliJ SDK, run tests and build plugin
+        id: package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          sdk_dir=$(mktemp -d "$RUNNER_TEMP/idea-sdk.XXXXXX")
+          trap 'rm -rf -- "$sdk_dir" && test ! -e "$sdk_dir" || exit 1' EXIT
+          sdk_info=$(bash .github/scripts/install-idea.sh "$sdk_dir")
+          IDEA_HOME="$sdk_dir" ./gradlew --no-daemon check buildPlugin
+
+          zip="talend-idea-plugin-$VERSION.zip"
+          artifact_dir="$RUNNER_TEMP/plugin-artifact"
+          mkdir -- "$artifact_dir"
+          cp -- "build/distributions/$zip" "$artifact_dir/"
+          cd -- "$artifact_dir"
+          printf 'Version: %s\nCommit: %s\n%s\n' "$VERSION" "$GITHUB_SHA" "$sdk_info" > BUILD_INFO.txt
+          sha256sum -- "$zip" BUILD_INFO.txt > SHA256SUMS
+          read -r zip_digest _ < SHA256SUMS
+          printf 'zip-sha256=%s\n' "$zip_digest" >> "$GITHUB_OUTPUT"
+      - name: Keep the tested plugin and build identity
+        id: artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: talend-idea-plugin-${{ steps.version.outputs.version }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/plugin-artifact/
+          if-no-files-found: error
+          compression-level: 0
+      - name: Keep reports from a failed build
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: failed-test-reports-${{ github.run_attempt }}
+          path: |
+            build/reports/
+            build/test-results/
+          if-no-files-found: ignore

@@ -1,0 +1,158 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  checks:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish tested plugin
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: plugin-release-${{ needs.checks.outputs.version }}
+      cancel-in-progress: false
+    env:
+      VERSION: ${{ needs.checks.outputs.version }}
+      ARTIFACT_ID: ${{ needs.checks.outputs.artifact-id }}
+      ZIP_SHA256: ${{ needs.checks.outputs.zip-sha256 }}
+    steps:
+      - name: Validate release inputs
+        run: |
+          [[ "$GITHUB_REF" == refs/heads/main && "$GITHUB_SHA" =~ ^[a-f0-9]{40}$ &&
+             "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ &&
+             "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ && "$ZIP_SHA256" =~ ^[a-f0-9]{64}$ ]] || {
+            echo 'Invalid release inputs from CI' >&2
+            exit 1
+          }
+      # No checkout, rebuild, or execution of artifact content in the write job.
+      - name: Download the exact artifact from CI
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ env.ARTIFACT_ID }}
+          path: ${{ runner.temp }}/release-assets
+          merge-multiple: true
+      - name: Verify and publish the release
+        working-directory: ${{ runner.temp }}/release-assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          die() { echo "$*" >&2; exit 1; }
+
+          repo="repos/$GITHUB_REPOSITORY"
+          tag="v$VERSION"
+          zip="talend-idea-plugin-$VERSION.zip"
+          names=("$zip" BUILD_INFO.txt SHA256SUMS)
+
+          # List includes drafts; a published version is never touched, even on a new commit.
+          releases=$(gh api --paginate --slurp "$repo/releases?per_page=100" |
+            jq -c --arg tag "$tag" '[.[][] | select(.tag_name == $tag)]')
+          if jq -e 'any(.[]; .draft == false)' <<< "$releases" >/dev/null; then
+            echo "$tag is already published."
+            exit 0
+          fi
+
+          for name in "${names[@]}"; do
+            [[ -f "$name" && ! -L "$name" && -s "$name" ]] || die "Missing or invalid CI asset: $name"
+          done
+          [[ "$(sha256sum -- "$zip")" == "$ZIP_SHA256  $zip" ]] || die 'CI ZIP digest mismatch'
+          [[ "$(head -n 2 BUILD_INFO.txt)" == "$(printf 'Version: %s\nCommit: %s' "$VERSION" "$GITHUB_SHA")" ]] ||
+            die 'CI build identity does not match this version and commit'
+          sha256sum -- "$zip" BUILD_INFO.txt | cmp - SHA256SUMS || die 'CI checksum manifest mismatch'
+
+          exact_tag_ref() {
+            gh api "$repo/git/matching-refs/tags/$tag" |
+              jq -r --arg ref "refs/tags/$tag" '.[] | select(.ref == $ref) | .ref'
+          }
+          verify_tag() {
+            [[ "$(gh api "$repo/commits/refs/tags/$tag" --jq '.sha')" == "$GITHUB_SHA" ]] ||
+              die "$tag does not resolve to tested commit $GITHUB_SHA; will not move it"
+          }
+          tag_ref=$(exact_tag_ref)
+          if [[ -n "$tag_ref" ]]; then
+            verify_tag
+          fi
+
+          notes=$(printf 'Built and tested at commit `%s`.\n\n<!-- talend-idea-plugin release workflow -->' "$GITHUB_SHA")
+          verify_draft() {
+            jq -er --arg tag "$tag" --arg sha "$GITHUB_SHA" --arg body "$notes" '
+              select(.draft == true and .prerelease == false and .immutable != true
+                and .tag_name == $tag and .target_commitish == $sha and .body == $body
+                and .author.login == "github-actions[bot]") | .id
+            ' <<< "$1" || die "$tag has a draft not owned by this workflow for tested commit $GITHUB_SHA"
+          }
+          case "$(jq length <<< "$releases")" in
+            0) draft=$(gh api --method POST "$repo/releases" -f tag_name="$tag" \
+                 -f target_commitish="$GITHUB_SHA" -f name="$tag" -f body="$notes" -F draft=true) ;;
+            1) draft=$(jq -c '.[0]' <<< "$releases") ;;
+            *) die "Multiple drafts exist for $tag; refusing to choose one" ;;
+          esac
+          id=$(verify_draft "$draft")
+          [[ "$id" =~ ^[1-9][0-9]*$ ]] || die 'Invalid draft release ID'
+
+          expected=$(sha256sum -- "${names[@]}" | jq -Rn '
+            [inputs | capture("^(?<hash>[a-f0-9]{64})  (?<name>.+)$")
+              | {key: .name, value: ("sha256:" + .hash)}] | from_entries
+          ')
+          list_assets() { gh api "$repo/releases/$id/assets?per_page=100"; }
+          # GitHub can leave an empty starter asset after an interrupted upload.
+          remove_empty_starters() {
+            local starters asset_id
+            starters=$(jq -er --argjson expected "$expected" '
+              if length == (map(.name) | unique | length) and
+                 all(.[]; ($expected[.name] != null) and
+                   ((.state == "starter" and .size == 0 and (.digest == null or .digest == "")) or
+                    (.state == "uploaded" and .digest == $expected[.name])))
+              then [.[] | select(.state == "starter") | .id] | @tsv
+              else error("Unexpected, incomplete, or different asset")
+              end
+            ' <<< "$1") || die "Cannot safely resume draft $tag"
+            for asset_id in $starters; do
+              [[ "$asset_id" =~ ^[1-9][0-9]*$ ]] || die 'Invalid starter asset ID'
+              gh api --method DELETE "$repo/releases/assets/$asset_id"
+            done
+          }
+          verify_assets() {
+            jq -e --argjson expected "$expected" '
+              length == (map(.name) | unique | length) and
+              all(.[]; .state == "uploaded" and .digest != null and .digest == $expected[.name])
+            ' <<< "$1" >/dev/null || die "Draft $tag contains an unexpected, incomplete, or different asset"
+          }
+          assets=$(list_assets)
+          remove_empty_starters "$assets"
+          assets=$(list_assets)
+          verify_assets "$assets"
+          for name in "${names[@]}"; do
+            if ! jq -e --arg name "$name" 'any(.[]; .name == $name)' <<< "$assets" >/dev/null; then
+              curl --proto '=https' --fail --silent --show-error \
+                -H "Authorization: Bearer $GH_TOKEN" -H 'Content-Type: application/octet-stream' \
+                --data-binary "@$name" "https://uploads.github.com/$repo/releases/$id/assets?name=$name" >/dev/null
+            fi
+          done
+
+          assets=$(list_assets)
+          verify_assets "$assets"
+          [[ "$(jq length <<< "$assets")" == "${#names[@]}" ]] || die "Missing assets in draft $tag"
+          verify_draft "$(gh api "$repo/releases/$id")" >/dev/null
+          tag_ref=$(exact_tag_ref)
+          if [[ -z "$tag_ref" ]]; then
+            gh api --method POST "$repo/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" >/dev/null
+          fi
+          verify_tag
+          gh api --method PATCH "$repo/releases/$id" -F draft=false --jq '.html_url'

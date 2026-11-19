@@ -27,6 +27,8 @@ In IDEA, use **Settings → Plugins → ⚙ → Install Plugin from Disk** to in
 
 On project open, IDEA indexes the original Java Routine `.item` files under `code/routines`. Talend folders are organizational; Java package declarations determine how Routines resolve. Wait for indexing to finish before using completion, Go to Declaration, or Find Usages. Find Usages on a Routine also includes semantic matches in supported Java fragments in unopened Jobs; those entries navigate to the Job attribute and are not rename targets.
 
+A public class `Example` in `Example_0.1.item` does not need to be renamed to `Example.java`. The plugin accounts for the Talend version suffix in IDEA's filename check, without hiding other Java errors.
+
 Supported fragments include `tJava`, `tJavaRow`, and existing expressions and filters in standard `tMap`, including empty values. Completion uses Job context fields, row schemas, and Routines from the current Talend repository. External classes need their dependencies configured in IDEA. The `IMPORT` field uses a text editor so IDEA cannot remove imports used in another XML attribute.
 
 Fragments are not standalone Java classes. The plugin does not support refactorings that require modifying generated classes or Job schemas. It does not edit the graph or generate, compile, or run Jobs.

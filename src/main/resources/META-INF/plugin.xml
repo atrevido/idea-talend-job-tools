@@ -20,6 +20,9 @@
         <useScopeOptimizer implementation="dev.talend.idea.TalendRoutineFinder"/>
         <workspaceModel.serializerHook implementation="dev.talend.idea.TalendRoutineRoots$CacheFilter"/>
     </extensions>
+    <extensions defaultExtensionNs="com.intellij.lang.java">
+        <javaErrorFilter implementation="dev.talend.idea.TalendRoutineJavaErrorFilter"/>
+    </extensions>
     <actions>
         <action id="dev.talend.idea.EditJava" class="dev.talend.idea.EditTalendJavaAction"
                 text="Edit Talend Java…" description="Edit Java in a Talend Job">

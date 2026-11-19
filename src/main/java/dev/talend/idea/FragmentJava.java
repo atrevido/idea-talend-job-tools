@@ -64,6 +64,18 @@ final class FragmentJava implements AutoCloseable {
     }
 
     static PsiFile createPsi(XmlFile host, XmlTag job, TalendFragments.Fragment fragment, String source) {
+        return createPsi(host, job, fragment, source, true);
+    }
+
+    static PsiFile createSearchPsi(XmlFile host, XmlTag job, TalendFragments.Fragment fragment, String source) {
+        if (fragment.kind() == TalendFragments.Kind.IMPORTS) {
+            return scopedFile(host, TalendRoutineFinder.scopeFor(host), source);
+        }
+        return createPsi(host, job, fragment, source, false);
+    }
+
+    private static PsiFile createPsi(XmlFile host, XmlTag job, TalendFragments.Fragment fragment, String source,
+                                     boolean physical) {
         if (fragment.kind() == TalendFragments.Kind.IMPORTS) {
             // The consuming CODE is in another attribute. Don't let the Java import
             // optimizer treat this independently editable import list as unused code.
@@ -103,28 +115,33 @@ final class FragmentJava implements AutoCloseable {
         wrapper.append("}\n");
 
         GlobalSearchScope scope = TalendRoutineFinder.scopeFor(host);
-        var file = new LightVirtualFile("__TalendFragmentContext.java", JavaLanguage.INSTANCE, wrapper);
-        file.setOriginalFile(host.getVirtualFile());
-        var provider = new SingleRootFileViewProvider(PsiManager.getInstance(host.getProject()), file, false);
-        var context = new ScopedJavaFile(provider, scope);
-        provider.forceCachedPsi(context);
+        var context = scopedFile(host, scope, wrapper);
         PsiClass owner = context.getClasses()[0];
         PsiElement anchor = context.findElementAt(anchorOffset);
         var factory = JavaCodeFragmentFactory.getInstance(host.getProject());
         JavaCodeFragment psi = switch (fragment.kind()) {
-            case STATEMENTS -> factory.createCodeBlockCodeFragment(source, anchor, true);
-            case MEMBERS -> factory.createMemberCodeFragment(source, owner.getRBrace(), true);
+            case STATEMENTS -> factory.createCodeBlockCodeFragment(source, anchor, physical);
+            case MEMBERS -> factory.createMemberCodeFragment(source, owner.getRBrace(), physical);
             case EXPRESSION -> {
                 String type = fragment.expectedType();
                 PsiType expected = type == null ? null
                         : JavaPsiFacade.getElementFactory(host.getProject()).createTypeFromText(type, anchor);
-                yield factory.createExpressionCodeFragment(source, anchor, expected, true);
+                yield factory.createExpressionCodeFragment(source, anchor, expected, physical);
             }
             case IMPORTS -> throw new AssertionError();
         };
         psi.forceResolveScope(scope);
         // Like the generated Job code, this fragment may propagate checked exceptions.
         psi.setExceptionHandler(exception -> true);
+        return psi;
+    }
+
+    private static ScopedJavaFile scopedFile(XmlFile host, GlobalSearchScope scope, CharSequence source) {
+        var file = new LightVirtualFile("__TalendFragmentContext.java", JavaLanguage.INSTANCE, source);
+        file.setOriginalFile(host.getVirtualFile());
+        var provider = new SingleRootFileViewProvider(PsiManager.getInstance(host.getProject()), file, false);
+        var psi = new ScopedJavaFile(provider, scope);
+        provider.forceCachedPsi(psi);
         return psi;
     }
 

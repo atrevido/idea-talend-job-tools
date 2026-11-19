@@ -23,16 +23,24 @@ final class TalendFragments {
         }
     }
 
-    private static final String TALEND_NS = "platform:/resource/org.talend.model/model/TalendFile.xsd";
-    private static final String JOBLET_NS = "http://www.talend.com/joblet.ecore";
-    private static final String TEST_NS = "http://www.talend.com/testcontainer.ecore";
+    static final String TALEND_NS = "platform:/resource/org.talend.model/model/TalendFile.xsd";
+    static final String JOBLET_NS = "http://www.talend.com/joblet.ecore";
+    static final String TEST_NS = "http://www.talend.com/testcontainer.ecore";
+    static final String XMI_NS = "http://www.omg.org/XMI";
+    static final String XSI_NS = "http://www.w3.org/2001/XMLSchema-instance";
+    private static final List<String> MAPPER_TABLES = List.of("inputTables", "varTables", "outputTables");
+
+    static boolean processRoot(String name, String namespace) {
+        return ("ProcessType".equals(name) && TALEND_NS.equals(namespace))
+                || ("TestContainer".equals(name) && TEST_NS.equals(namespace));
+    }
 
     static XmlTag job(XmlFile file) {
         if (!file.getName().endsWith(".item")) return null;
         XmlTag root = file.getRootTag();
         if (root == null) return null;
-        if (is(root, "ProcessType", TALEND_NS) || is(root, "TestContainer", TEST_NS)) return root;
-        if (is(root, "XMI", "http://www.omg.org/XMI")) {
+        if (processRoot(root.getLocalName(), root.getNamespace())) return root;
+        if (is(root, "XMI", XMI_NS)) {
             for (XmlTag child : root.getSubTags()) {
                 if (is(child, "JobletProcess", JOBLET_NS)) return child;
             }
@@ -53,9 +61,9 @@ final class TalendFragments {
             String label = id == null || id.isEmpty() ? name : id + " (" + name + ")";
             switch (name) {
                 case "tJava", "tJavaRow" -> {
-                    addParameter(result, node, "CODE", Kind.STATEMENTS, label);
-                    if (name.equals("tJava")) addParameter(result, node, "CLASS_CODE", Kind.MEMBERS, label);
-                    addParameter(result, node, "IMPORT", Kind.IMPORTS, label);
+                    addParameter(result, node, name, "CODE", label);
+                    addParameter(result, node, name, "CLASS_CODE", label);
+                    addParameter(result, node, name, "IMPORT", label);
                 }
                 case "tMap" -> addMapperFragments(result, job, node, label);
                 default -> { }
@@ -64,9 +72,30 @@ final class TalendFragments {
         return result;
     }
 
-    private static void addParameter(List<Fragment> result, XmlTag node, String name, Kind kind, String label) {
+    private static void addParameter(List<Fragment> result, XmlTag node, String component, String name, String label) {
+        Kind kind = parameterKind(component, name);
+        if (kind == null) return;
         XmlTag param = parameter(node, name);
         if (param != null) add(result, node, param, "value", kind, label + " / " + name, null);
+    }
+
+    static Kind parameterKind(String component, String parameter) {
+        if (parameter == null || (!"tJava".equals(component) && !"tJavaRow".equals(component))) return null;
+        return switch (parameter) {
+            case "CODE" -> Kind.STATEMENTS;
+            case "CLASS_CODE" -> "tJava".equals(component) ? Kind.MEMBERS : null;
+            case "IMPORT" -> Kind.IMPORTS;
+            default -> null;
+        };
+    }
+
+    static boolean mapperTable(String name) {
+        return MAPPER_TABLES.contains(name);
+    }
+
+    static boolean mapperData(String name, String type) {
+        return "externalMapperData".equals(name)
+                || ("nodeData".equals(name) && type != null && ("MapperData".equals(type) || type.endsWith(":MapperData")));
     }
 
     private static void addMapperFragments(List<Fragment> result, XmlTag job, XmlTag node, String label) {
@@ -74,7 +103,7 @@ final class TalendFragments {
         if (mapper == null) return;
         for (XmlTag table : mapper.getSubTags()) {
             String tableKind = table.getLocalName();
-            if (!List.of("inputTables", "varTables", "outputTables").contains(tableKind)) continue;
+            if (!mapperTable(tableKind)) continue;
             String name = tableName(table);
             String tableLabel = label + " / " + switch (tableKind) {
                 case "inputTables" -> "Input ";
@@ -127,12 +156,8 @@ final class TalendFragments {
 
     private static XmlTag mapper(XmlTag node) {
         for (XmlTag tag : node.getSubTags()) {
-            if ("externalMapperData".equals(tag.getLocalName())) return tag;
             // EMF stores MapperData as the nodeData containment feature in .item files.
-            if ("nodeData".equals(tag.getLocalName())) {
-                String type = tag.getAttributeValue("type", "http://www.w3.org/2001/XMLSchema-instance");
-                if ("MapperData".equals(type) || (type != null && type.endsWith(":MapperData"))) return tag;
-            }
+            if (mapperData(tag.getLocalName(), tag.getAttributeValue("type", XSI_NS))) return tag;
         }
         return null;
     }
